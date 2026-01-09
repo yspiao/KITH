@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>SURROGATE KITHARA</title>
+    <style>
+        :root {
+            --bg: #100b08; /* Darker, wood-like ambient */
+            --surface: #1a1512;
+            --primary: #d4c5b0; /* Parchment/Wood tone */
+            --dim: #5c4f45;
+            --accent: #8c7b6c;
+            
+            /* Partch Colors */
+            --oto-color: #e0e0e0; /* Bright / Otonality */
+            --uto-color: #6da6d6; /* Blueish / Utonality (often coded blue/orange in diagrams, using subtle blue for contrast) */
+            --slide-color: #c9a875; /* Glass/Amber rod color */
+            --gap-color: #000000;
+        }
+        
+        body {
+            margin: 0; background-color: var(--bg); color: var(--primary);
+            font-family: 'Courier New', Courier, monospace; overflow: hidden;
+            user-select: none; display: flex; flex-direction: column;
+            height: 100dvh; overscroll-behavior: none;
+        }
+        
+        /* HEADER */
+        header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 20px; border-bottom: 2px solid var(--dim);
+            z-index: 10; background: var(--surface); height: 60px; box-sizing: border-box; flex-shrink: 0;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+
+        .brand { 
+            font-weight: bold; letter-spacing: 2px; font-size: 16px; 
+            color: var(--primary); text-transform: uppercase;
+        }
+        
+        .controls { display: flex; gap: 15px; align-items: center; }
+        
+        /* Removed Harmonics button style as requested */
+
+        #instrument-container {
+            flex-grow: 1; position: relative; cursor: crosshair; touch-action: none;
+            width: 100%; height: 100%; overflow: hidden;
+            background: linear-gradient(to right, #0d0a08 0%, #161210 50%, #0d0a08 100%);
+        }
+        canvas { display: block; width: 100%; height: 100%; }
+
+        #ratio-display {
+            font-size: 15vw; font-weight: bold; color: rgba(255,255,255,0.04); 
+            position: absolute; top: 35%; left: 50%; transform: translate(-50%, -50%);
+            pointer-events: none; z-index: 0; transition: color 0.1s; white-space: nowrap;
+            font-family: 'Times New Roman', serif; /* More classical/academic feel for Partch */
+        }
+        #ratio-display.locked { color: rgba(200, 180, 150, 0.2); }
+        
+        #start-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(10,8,6,0.98);
+            display: flex; justify-content: center; align-items: center;
+            z-index: 9999;
+        }
+        
+        .big-btn {
+            border: 1px solid var(--primary); 
+            padding: 15px 30px; font-size: 18px; letter-spacing: 4px; 
+            color: var(--primary); background: transparent; transition: 0.3s;
+            cursor: pointer; text-transform: uppercase;
+        }
+        .big-btn:hover { background: var(--primary); color: var(--bg); box-shadow: 0 0 20px rgba(212, 197, 176, 0.3); }
+
+        /* Labels for the two canons */
+        .canon-label {
+            position: absolute; bottom: 10px; font-size: 12px; opacity: 0.5; pointer-events: none;
+            width: 50%; text-align: center; letter-spacing: 2px;
+        }
+        #label-oto { left: 0; color: var(--oto-color); }
+        #label-uto { right: 0; color: var(--uto-color); }
+
+    </style>
+</head>
+<body>
+
+    <div id="start-overlay">
+        <button class="big-btn" id="init-btn">Initialize Kithara</button>
+    </div>
+
+    <header>
+        <div class="brand">Surrogate Kithara</div>
+        <div class="controls">
+            </div>
+    </header>
+
+    <div id="instrument-container">
+        <div id="ratio-display"></div>
+        <div id="label-oto" class="canon-label">OTONALITY</div>
+        <div id="label-uto" class="canon-label">UTONALITY</div>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script>
+        // --- 1. CONFIGURATION ---
+        const SNAP_THRESHOLD_MAIN = 30; 
+        const SNAP_THRESHOLD_SUB = 10;
+        
+        // --- 2. GLOBAL VARIABLES ---
+        let audioCtx;
+        let masterGain;
+        let canvas, ctx;
+        let width, height;
+        
+        let isMouseDown = false;
+        let pulses = []; 
+        let rawMouseY = 0; 
+        let lastMouseY = 0;
+        let lastTriggeredStringIndex = -1;
+        
+        let activeVoices = [];
+        let activeTouches = new Map(); 
+
+        let slideState = {
+            active: false, y: 0, displayRatio: 1.0, isSnapped: false
+        };
+
+        // Partch 43-tone Scale Map (Reference for Slide)
+        const scaleMap = [
+            { r: 1/1, label: '1/1', main: true }, { r: 81/80 }, { r: 33/32 }, { r: 21/20 }, { r: 16/15 }, { r: 12/11 }, 
+            { r: 11/10 }, { r: 10/9 }, { r: 9/8, label: '9/8', main: true }, { r: 8/7 }, { r: 7/6 }, { r: 32/27 }, 
+            { r: 6/5, label: '6/5', main: true }, { r: 11/9 }, { r: 5/4, label: '5/4', main: true }, { r: 14/11 }, 
+            { r: 9/7 }, { r: 21/16 }, { r: 4/3, label: '4/3', main: true }, { r: 27/20 }, { r: 11/8 }, { r: 7/5 }, 
+            { r: 10/7 }, { r: 16/11 }, { r: 40/27 }, { r: 3/2, label: '3/2', main: true }, { r: 32/21 }, { r: 14/9 }, 
+            { r: 11/7 }, { r: 8/5, label: '8/5', main: true }, { r: 18/11 }, { r: 5/3 }, { r: 27/16 }, { r: 12/7 }, 
+            { r: 7/4 }, { r: 16/9 }, { r: 9/5 }, { r: 20/11 }, { r: 11/6 }, { r: 15/8, label: '15/8', main: true }, 
+            { r: 40/21 }, { r: 64/33 }, { r: 160/81 }, { r: 2/1, label: '2/1', main: true }
+        ];
+
+        // --- TUNING: SURROGATE KITHARA (16 Strings) ---
+        // Base Frequency: G = 98Hz (Partch's Fundamental)
+        const BASE_FREQ = 98.0; 
+        
+        // Bank 1: OTONALITY (8 Strings) - "Emerald Canon"
+        // Based on 11-Limit Otonality (Major identities: 1, 3, 5, 7, 9, 11)
+        // Ratios: 1/1, 9/8, 5/4, 11/8, 3/2, 7/4, 15/8, 2/1
+        const OTO_RATIOS = [1/1, 9/8, 5/4, 11/8, 3/2, 7/4, 15/8, 2/1];
+
+        // Bank 2: UTONALITY (8 Strings) - "Orange Canon"
+        // Based on 11-Limit Utonality (Minor identities: 1/(1..11))
+        // Inversions of the Otonality sequence to maintain symmetry
+        // Ratios: 1/1, 16/9, 8/5, 16/11, 4/3, 8/7, 16/15, 1/1(8va below) -> adapted to 43-tone scale
+        // Partch's Utonality Scale: 1/1, 16/9, 8/5, 16/11, 4/3, 8/7, 16/15, 1/1 (Descending feel)
+        // Order usually low to high on instrument:
+        const UTO_RATIOS = [1/1, 16/9, 8/5, 16/11, 4/3, 8/7, 32/21, 2/1]; // Adjusted for ascending pitch order on strings
+
+        const STRINGS = [];
+        // Populate Strings
+        OTO_RATIOS.forEach(r => STRINGS.push({ freq: BASE_FREQ * r, type: 'oto' }));
+        UTO_RATIOS.forEach(r => STRINGS.push({ freq: BASE_FREQ * r, type: 'uto' }));
+
+        // Total 16 Strings
+
+        // --- 3. INITIALIZATION ---
+        window.onload = () => {
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+            document.getElementById('init-btn').addEventListener('click', initAudio);
+            window.addEventListener('resize', resize);
+            
+            // Input Handlers
+            canvas.addEventListener('touchstart', handleTouchStart, {passive: false});
+            canvas.addEventListener('touchmove', handleTouchMove, {passive: false});
+            canvas.addEventListener('touchend', handleTouchEnd, {passive: false});
+            canvas.addEventListener('touchcancel', handleTouchEnd, {passive: false});
+            canvas.addEventListener('mousedown', handleMouseDown);
+            window.addEventListener('mousemove', handleMouseMove); 
+            window.addEventListener('mouseup', handleMouseUp);
+
+            resize();
+        };
+
+        function resize() {
+            if (!canvas) return;
+            const container = document.getElementById('instrument-container');
+            width = canvas.width = container.clientWidth;
+            height = canvas.height = container.clientHeight;
+        }
+
+        function initAudio() {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            audioCtx = new AudioContext();
+            masterGain = audioCtx.createGain();
+            masterGain.gain.value = 0.8; 
+            masterGain.connect(audioCtx.destination);
+            document.getElementById('start-overlay').style.display = 'none';
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            requestAnimationFrame(animate);
+        }
+
+        // --- 4. DSP (KITHARA SOUND) ---
+        function clamp(x, a, b){ return Math.min(b, Math.max(a, x)); }
+        function makePickNoiseBuffer(ctx, seconds=0.05){
+            const n = Math.max(32, Math.floor(ctx.sampleRate * seconds));
+            const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+            const d = buf.getChannelData(0);
+            for (let i=0;i<n;i++){ d[i] = (Math.random()*2 - 1) * Math.pow(1 - i/(n-1), 2); }
+            return buf;
+        }
+
+        // Kithara Sound Engine: Brighter, sharper attack, complex resonance
+        function pluckKitharaString(ctx, destination, freq, ratio, type) {
+            const t0 = ctx.currentTime;
+            const f = freq * ratio;
+            
+            // Filter color based on Tonality (Subtle distinction)
+            // Otonality = Clearer, Utonality = Slightly darker/woodier
+            const brightness = type === 'oto' ? 2000 : 1600;
+
+            const gain = ctx.createGain();
+            gain.gain.setValueAtTime(0, t0);
+            gain.gain.linearRampToValueAtTime(0.4, t0 + 0.005); // Sharp attack
+            gain.gain.exponentialRampToValueAtTime(0.001, t0 + 4.0); // Long sustain (open string)
+
+            // Oscillators: Sawtooth + Triangle for string harmonics
+            const osc1 = ctx.createOscillator(); osc1.type = 'sawtooth';
+            const osc2 = ctx.createOscillator(); osc2.type = 'triangle';
+            
+            osc1.frequency.value = f;
+            osc2.frequency.value = f;
+            
+            // Detune for realism
+            osc2.detune.value = 3; 
+
+            // Filter: Resonant Lowpass
+            const filter = ctx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = f * 8; // Bright start
+            filter.Q.value = 2; // Resonant
+            filter.frequency.exponentialRampToValueAtTime(f * 2, t0 + 0.3); // Decay brightness
+
+            // Body Resonance (Simulating the Canon box)
+            const body = ctx.createBiquadFilter();
+            body.type = 'peaking';
+            body.frequency.value = 250; // Box resonance
+            body.gain.value = 5;
+            body.Q.value = 1.0;
+
+            // Attack Noise (Glass rod/Pick click)
+            const noise = ctx.createBufferSource();
+            noise.buffer = makePickNoiseBuffer(ctx);
+            const noiseGain = ctx.createGain();
+            noiseGain.gain.value = 0.2;
+            
+            // Connections
+            osc1.connect(filter);
+            osc2.connect(filter);
+            filter.connect(gain);
+            
+            noise.connect(noiseGain);
+            noiseGain.connect(gain);
+            
+            gain.connect(body);
+            body.connect(destination);
+
+            osc1.start(t0); osc2.start(t0); noise.start(t0);
+            osc1.stop(t0 + 4.5); osc2.stop(t0 + 4.5);
+
+            const voiceObj = { oscList: [osc1, osc2], baseFreq: freq, type: 'KITHARA' };
+            activeVoices.push(voiceObj);
+            setTimeout(() => { 
+                const idx = activeVoices.indexOf(voiceObj); 
+                if(idx > -1) activeVoices.splice(idx, 1); 
+            }, 4500);
+        }
+
+        // --- 5. LOGIC ---
+        function getLocalCoords(evt, canvas) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = evt.clientX || (evt.touches && evt.touches[0] ? evt.touches[0].clientX : 0);
+            const clientY = evt.clientY || (evt.touches && evt.touches[0] ? evt.touches[0].clientY : 0);
+            return { x: clientX - rect.left, y: clientY - rect.top };
+        }
+
+        function calculateRatio(py) {
+            let closestDist = Infinity;
+            let closestIdx = -1;
+            scaleMap.forEach((item, index) => {
+                const targetY = (index / (scaleMap.length - 1)) * height;
+                const dist = Math.abs(py - targetY);
+                const threshold = item.main ? SNAP_THRESHOLD_MAIN : SNAP_THRESHOLD_SUB;
+                if (dist < threshold && dist < closestDist) { closestDist = dist; closestIdx = index; }
+            });
+
+            if (closestIdx !== -1) {
+                return { ratio: scaleMap[closestIdx].r, isSnapped: true, idx: closestIdx, snappedY: (closestIdx / (scaleMap.length - 1)) * height, display: scaleMap[closestIdx].label || formatRatio(scaleMap[closestIdx].r) };
+            } else {
+                const ratioIdxFloat = (py / height) * (scaleMap.length - 1);
+                const idxFloor = Math.floor(ratioIdxFloat);
+                const r1 = scaleMap[Math.max(0, idxFloor)];
+                const r2 = scaleMap[Math.min(scaleMap.length-1, idxFloor+1)];
+                const pct = ratioIdxFloat - idxFloor;
+                let r = 1.0; if(r1 && r2) r = r1.r + (r2.r - r1.r) * pct;
+                return { ratio: r, isSnapped: false, idx: -1, snappedY: py, display: "" };
+            }
+        }
+
+        function checkTrigger(x, y, touchId) {
+            const stringCount = 16;
+            const gapSize = 30; // Gap between two canons
+            // Calculate effective width for strings: Total width minus gap
+            // We split width into 2 halves. 
+            // Left Canon (0-7): 0 to width/2 - gap/2
+            // Right Canon (8-15): width/2 + gap/2 to width
+            
+            const bankWidth = (width - gapSize) / 2;
+            const stringSpacing = bankWidth / 8;
+            
+            let strIdx = -1;
+            
+            // Check Left Bank
+            if (x < width/2 - gapSize/2) {
+                strIdx = Math.floor(x / stringSpacing);
+                if (strIdx > 7) strIdx = 7;
+            } 
+            // Check Right Bank
+            else if (x > width/2 + gapSize/2) {
+                let localX = x - (width/2 + gapSize/2);
+                strIdx = 8 + Math.floor(localX / stringSpacing);
+                if (strIdx > 15) strIdx = 15;
+            }
+
+            let lastIdx = (touchId === -1) ? lastTriggeredStringIndex : (activeTouches.get(touchId)?.lastStr ?? -1);
+
+            if (strIdx >= 0 && strIdx < 16 && strIdx !== lastIdx) {
+                // Calculate visual center of string for ripple
+                let visualX;
+                if (strIdx < 8) {
+                    visualX = (strIdx * stringSpacing) + (stringSpacing / 2);
+                } else {
+                    visualX = (width/2 + gapSize/2) + ((strIdx - 8) * stringSpacing) + (stringSpacing / 2);
+                }
+
+                const r = calculateRatio(y).ratio; 
+                const stringData = STRINGS[strIdx];
+                
+                // Play Sound
+                if (audioCtx && audioCtx.state === 'running') {
+                    pluckKitharaString(audioCtx, masterGain, stringData.freq, r, stringData.type);
+                }
+
+                // Visuals
+                const color = stringData.type === 'oto' ? '#ffffff' : '#6da6d6';
+                pulses.push({ x: visualX, life: 1, color: color, w: 3 });
+
+                if (touchId === -1) lastTriggeredStringIndex = strIdx;
+                else if (activeTouches.has(touchId)) activeTouches.get(touchId).lastStr = strIdx;
+            }
+        }
+
+        function updateSlideState() {
+            let targetY = rawMouseY;
+            let activeTouchCount = 0;
+            if (activeTouches.size > 0) {
+                for (let t of activeTouches.values()) { targetY = t.y; activeTouchCount++; }
+            } else if (!isMouseDown) {
+                slideState.active = false; return;
+            }
+            if (isMouseDown || activeTouchCount > 0) slideState.active = true;
+
+            const res = calculateRatio(targetY);
+            slideState.y = res.snappedY || targetY;
+            slideState.displayRatio = res.ratio;
+            slideState.isSnapped = res.isSnapped;
+            
+            updateRatioDisplay(res);
+            updateVoicesPitch();
+        }
+
+        function updateRatioDisplay(res) {
+            const disp = document.getElementById('ratio-display');
+            disp.innerText = res.display;
+            if (res.isSnapped) disp.classList.add('locked'); else disp.classList.remove('locked');
+        }
+
+        function updateVoicesPitch() {
+            if (activeVoices.length === 0) return;
+            const t = audioCtx.currentTime;
+            const currentR = calculateRatio(slideState.y).ratio;
+            activeVoices.forEach(voice => {
+                voice.oscList.forEach(osc => {
+                    osc.frequency.setTargetAtTime(voice.baseFreq * currentR, t, 0.05);
+                });
+            });
+        }
+
+        // --- HANDLERS ---
+        function handleMouseDown(e) { isMouseDown = true; const pos = getLocalCoords(e, canvas); rawMouseY = pos.y; updateSlideState(); checkTrigger(pos.x, pos.y, -1); }
+        function handleMouseUp() { isMouseDown = false; lastTriggeredStringIndex = -1; updateSlideState(); }
+        function handleMouseMove(e) { 
+            if (!canvas) return; const pos = getLocalCoords(e, canvas); rawMouseY = pos.y; updateSlideState(); 
+            if(isMouseDown) checkTrigger(pos.x, pos.y, -1); 
+        }
+        function handleTouchStart(e) {
+            e.preventDefault(); const rect = canvas.getBoundingClientRect(); let lastId = -1;
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const t = e.changedTouches[i]; const tx = t.clientX - rect.left; const ty = t.clientY - rect.top;
+                activeTouches.set(t.identifier, { x: tx, y: ty, lastStr: -1 });
+                checkTrigger(tx, ty, t.identifier); lastId = t.identifier;
+            }
+            updateSlideState();
+        }
+        function handleTouchMove(e) {
+            e.preventDefault(); const rect = canvas.getBoundingClientRect();
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const t = e.changedTouches[i]; const touchData = activeTouches.get(t.identifier);
+                if (touchData) { 
+                    const tx = t.clientX - rect.left; const ty = t.clientY - rect.top;
+                    touchData.x = tx; touchData.y = ty; checkTrigger(tx, ty, t.identifier);
+                }
+            }
+            updateSlideState();
+        }
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            for (let i = 0; i < e.changedTouches.length; i++) { activeTouches.delete(e.changedTouches[i].identifier); }
+            updateSlideState();
+        }
+
+        function formatRatio(r) { return r ? r.toFixed(2) : ""; }
+
+        // --- RENDERING ---
+        function drawGrid() {
+            const step = height / (scaleMap.length - 1);
+            scaleMap.forEach((item, index) => {
+                const y = index * step;
+                ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y);
+                if (slideState.isSnapped && Math.abs(y - slideState.y) < 2) {
+                    ctx.strokeStyle = 'rgba(201, 168, 117, 0.6)'; ctx.lineWidth = 2; // Gold/Glass color
+                } else if (item.main) {
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)'; ctx.lineWidth = 1;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)'; ctx.font = '12px Courier New'; ctx.textAlign = 'right';
+                    ctx.fillText(item.label, width - 5, y - 2);
+                } else { ctx.strokeStyle = 'rgba(255, 255, 255, 0.02)'; ctx.lineWidth = 1; }
+                ctx.stroke();
+            });
+        }
+
+        function drawStrings() {
+            const gapSize = 30;
+            const bankWidth = (width - gapSize) / 2;
+            const stringSpacing = bankWidth / 8;
+
+            for (let i = 0; i < 16; i++) {
+                let centerX;
+                // Calculate X with Gap logic
+                if (i < 8) {
+                    centerX = (i * stringSpacing) + (stringSpacing / 2);
+                } else {
+                    centerX = (width/2 + gapSize/2) + ((i - 8) * stringSpacing) + (stringSpacing / 2);
+                }
+
+                // Check Highlight
+                let highlight = false;
+                if (isMouseDown) {
+                    // Simple distance check for mouse
+                    // (Omitted strict check for simplicity, visual only)
+                }
+                activeTouches.forEach(t => { if(Math.abs(t.x - centerX) < stringSpacing/2) highlight = true; });
+
+                if (highlight) { 
+                    ctx.fillStyle = i < 8 ? 'rgba(255,255,255,0.1)' : 'rgba(109, 166, 214, 0.15)'; 
+                    ctx.fillRect(centerX - stringSpacing/2, 0, stringSpacing, height); 
+                }
+                
+                // Draw String
+                ctx.beginPath(); ctx.moveTo(centerX, 0); ctx.lineTo(centerX, height);
+                if (i < 8) {
+                    ctx.strokeStyle = '#999'; // Silver/Steel for Otonality
+                } else {
+                    ctx.strokeStyle = '#b87c56'; // Bronze/Copper for Utonality (Visual distinction)
+                }
+                ctx.lineWidth = 2; ctx.stroke();
+            }
+            
+            // Draw Canon Divider (Gap)
+            ctx.fillStyle = '#000';
+            ctx.fillRect(width/2 - gapSize/2, 0, gapSize, height);
+            ctx.beginPath(); ctx.moveTo(width/2, 0); ctx.lineTo(width/2, height);
+            ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.stroke();
+        }
+
+        function drawPulses() {
+            for (let i = pulses.length - 1; i >= 0; i--) {
+                let p = pulses[i];
+                ctx.shadowBlur = 15 * p.life; ctx.shadowColor = p.color; ctx.strokeStyle = `rgba(255, 255, 255, ${p.life})`; ctx.lineWidth = p.w ? p.w : 3;
+                ctx.beginPath(); ctx.moveTo(p.x, 0);
+                for (let y = 0; y <= height; y += 30) { ctx.lineTo(p.x + (Math.random() - 0.5) * 10 * p.life, y); }
+                ctx.lineTo(p.x, height); ctx.stroke();
+                ctx.shadowBlur = 0; p.life -= 0.04; if (p.life <= 0) pulses.splice(i, 1);
+            }
+        }
+
+        function drawSlide() {
+            let y = slideState.y;
+            const barHeight = 22;
+            // Glass Rod Visual
+            const rodColor = 'rgba(200, 220, 255, 0.4)';
+            const coreColor = 'rgba(255, 255, 255, 0.8)';
+
+            ctx.save();
+            ctx.fillStyle = rodColor; 
+            ctx.fillRect(0, y - barHeight/2, width, barHeight);
+            
+            // Bright core line
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y);
+            ctx.strokeStyle = coreColor; ctx.lineWidth = 2; ctx.stroke();
+            
+            // Touch points
+            ctx.fillStyle = '#fff';
+            activeTouches.forEach(t => { ctx.beginPath(); ctx.arc(t.x, t.y, 10, 0, Math.PI*2); ctx.fill(); });
+            ctx.restore();
+        }
+
+        function animate() {
+            if (!ctx) return;
+            ctx.fillStyle = '#100b08'; ctx.fillRect(0, 0, width, height);
+            drawGrid(); drawStrings(); drawPulses(); drawSlide();
+            requestAnimationFrame(animate);
+        }
+    </script>
+</body>
+</html>
